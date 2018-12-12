@@ -1,5 +1,6 @@
 import boto3
 import MySQLdb
+import csv
 import time
 import os
 from configs.readconfig import configp
@@ -19,9 +20,10 @@ mysql_host = configp.get('mysql', 'mysql_host')
 mysql_user = configp.get('mysql', 'mysql_user')
 mysql_password = configp.get('mysql', 'mysql_password')
 mysql_db = configp.get('mysql', 'mysql_db')
-#timestr = time.strftime("%Y%m%d")
-timestr = '20181205'
+timestr = time.strftime("%Y%m%d")
+#timestr = '20181205'
 aws_assessment_run_name = configp.get('aws', 'aws_assessment_run_name') + '_' + timestr
+download_dir = "aws_vulnerability" + '_' + timestr + ".csv"
 
 # --------------------------------Variable declaration section Ends---------------------------------------#
 
@@ -30,8 +32,10 @@ conn = MySQLdb.Connection(
     host=mysql_host,
     user=mysql_user,
     passwd=mysql_password,
-    db=mysql_db
+    db=mysql_db,
+    autocommit='true'
 )
+
 
 client = boto3.client('inspector',
                       aws_access_key_id = aws_access_key_id,
@@ -52,15 +56,6 @@ def list_todays_assessment_run():
     return (list_todays_assessment_run)
 
 
-def download_assessment_findings(assessmentRunArn):
-    download_assessment_findings = client.get_assessment_report(
-        assessmentRunArn=assessmentRunArn,
-        reportFileFormat='HTML',
-        reportType='FINDING'
-    )
-    print(download_assessment_findings)
-
-
 def list_findings_last_assessments(assessmentRunArn):
     list_findings_last_assessments = client.list_findings(
         assessmentRunArns=[
@@ -71,28 +66,7 @@ def list_findings_last_assessments(assessmentRunArn):
     return (list_findings_last_assessments['findingArns'])
 
 
-def describe_findings(findings_arn):
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM aws_inspector_findings')
-    for finding in findings_arn:
-        describe_findings = client.describe_findings(
-            findingArns=[
-                finding
-            ],
-            locale='EN_US'
-        )
-        sql_insert_query = """ INSERT INTO `aws_inspector_findings`
-                          (`HOSTNAME`, `SEVERITY`, `FINDINGS_TITLE`, `INDICATOR_OF_COMPROMISE`, `FINDINGS_DESCRIPTION`, `RECOMMENDATION`) VALUES (%s,%s,%s,%s,%s,%s)"""
-
-        insert_tuple = (
-        describe_findings['findings'][0]['assetAttributes']['hostname'], describe_findings['findings'][0]['severity'],
-        describe_findings['findings'][0]['title'], describe_findings['findings'][0]['indicatorOfCompromise'],
-        describe_findings['findings'][0]['description'], describe_findings['findings'][0]['recommendation'])
-        cursor.execute(sql_insert_query, insert_tuple)
-        conn.commit()
-
 def save_findings_to_csv(findings_arn):
-    download_dir = "aws_vulnerability" + '_' + timestr + ".csv"
     os.remove(download_dir)
     csv = open(download_dir, "a")
     columnTitleRow = "Plugin_ID, CVE, CVSS, Risk, Host, Protocol, Port, Name, Synopsis, Description, Solution, See_Also, Plugin_Output\n"
@@ -105,7 +79,6 @@ def save_findings_to_csv(findings_arn):
             ],
             locale='EN_US'
         )
-        #print(describe_findings['findings'][0]['recommendation'])
         Plugin_ID = 'NA'
         CVE = describe_findings['findings'][0]['id']
         CVSS = describe_findings['findings'][0]['attributes'][0]['value']
@@ -123,12 +96,27 @@ def save_findings_to_csv(findings_arn):
         csv.write(row)
 
 
+def import_csv_to_mysql_table():
+    cursor = conn.cursor()
+    cursor.execute('TRUNCATE TABLE aws_vulnerability')
+    csv_data = csv.reader(file(download_dir))
+    headers = next(csv_data)
+    for row in csv_data:
+        cursor.execute('INSERT INTO `aws_vulnerability`(`Plugin_ID`, `CVE`, `CVSS`, \
+        `Risk`, `Host`, `Protocol`, `Port`, `Name`, `Synopsis`, `Description`, `Solution`, \
+        `See_Also`, `Plugin_Output`, `inserted_on`)' \
+        'VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                       (row[0], row[1], row[2], row[3], row[4], row[5], \
+                        row[6], row[7], row[8], row[9], row[10], row[11], row[12], timestr))
+    cursor.close()
+
+
+
 def main():
     assessment_run_arn = list_todays_assessment_run()
-    #download_assessment_findings(assessment_run_arn['assessmentRunArns'][0])
     findings_arn = list_findings_last_assessments(assessment_run_arn['assessmentRunArns'][0])
-    #describe_findings(findings_arn)
     save_findings_to_csv(findings_arn)
+    import_csv_to_mysql_table()
 
 
 main()
